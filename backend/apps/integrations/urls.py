@@ -29,4 +29,7 @@ urlpatterns = [
     path('health/', views.integration_health, name='integration-health'),
     path('calendar/<uuid:pk>/force-sync/', views.force_calendar_sync, name='force-calendar-sync'),
     path('calendar/conflicts/', views.calendar_conflicts, name='calendar-conflicts'),
+    
+    # Webhook Receiver
+    path('webhook/receive/', views.webhook_receiver, name='webhook-receiver'),
 ]

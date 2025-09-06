@@ -118,6 +118,35 @@ def initiate_oauth(request):
                 'response_type': 'code',
                 'state': f"{provider}:{integration_type}:{state}"
             })
+        elif provider == 'apple':
+            # Apple Calendar typically uses app-specific passwords
+            # For OAuth, you would use Sign in with Apple
+            auth_url = "https://appleid.apple.com/auth/authorize?" + urllib.parse.urlencode({
+                'client_id': getattr(settings, 'APPLE_CLIENT_ID', ''),
+                'redirect_uri': getattr(settings, 'APPLE_REDIRECT_URI', ''),
+                'response_type': 'code',
+                'scope': 'name email',
+                'response_mode': 'form_post',
+                'state': f"{provider}:{integration_type}:{state}"
+            })
+        elif provider == 'microsoft_teams':
+            # Microsoft Teams uses same OAuth as Outlook/Graph
+            scopes = get_provider_scopes(provider, integration_type)
+            auth_url = f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize?" + urllib.parse.urlencode({
+                'client_id': settings.MICROSOFT_CLIENT_ID,
+                'redirect_uri': settings.MICROSOFT_REDIRECT_URI,
+                'scope': ' '.join(scopes),
+                'response_type': 'code',
+                'state': f"{provider}:{integration_type}:{state}"
+            })
+        elif provider == 'webex':
+            auth_url = "https://webexapis.com/v1/authorize?" + urllib.parse.urlencode({
+                'client_id': getattr(settings, 'WEBEX_CLIENT_ID', ''),
+                'redirect_uri': getattr(settings, 'WEBEX_REDIRECT_URI', ''),
+                'response_type': 'code',
+                'scope': 'spark:meetings_write spark:meetings_read',
+                'state': f"{provider}:{integration_type}:{state}"
+            })
         else:
             return Response(
                 {'error': f'Provider {provider} not supported'},
@@ -136,6 +165,106 @@ def initiate_oauth(request):
 
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
+def webhook_receiver(request):
+    """
+    Generic webhook receiver with signature validation.
+    
+    This endpoint can be used to receive webhooks from external services
+    with proper signature validation for security.
+    """
+    try:
+        # Get webhook integration by URL or identifier
+        webhook_id = request.GET.get('webhook_id')
+        if not webhook_id:
+            return Response(
+                {'error': 'webhook_id parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            webhook = WebhookIntegration.objects.get(id=webhook_id, is_active=True)
+        except WebhookIntegration.DoesNotExist:
+            return Response(
+                {'error': 'Webhook integration not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get raw request body for signature validation
+        raw_body = request.body
+        
+        # Get signature from headers (try common header names)
+        signature = (
+            request.META.get('HTTP_X_WEBHOOK_SIGNATURE') or
+            request.META.get('HTTP_X_HUB_SIGNATURE_256') or
+            request.META.get('HTTP_X_STRIPE_SIGNATURE') or
+            request.META.get('HTTP_X_SIGNATURE')
+        )
+        
+        # Validate signature if secret key is configured
+        if webhook.secret_key:
+            from .utils import validate_webhook_signature_multiple_formats
+            
+            validation_result = validate_webhook_signature_multiple_formats(
+                raw_body, signature, webhook.secret_key
+            )
+            
+            if not validation_result['valid']:
+                logger.warning(
+                    f"Webhook signature validation failed for {webhook.name}: {validation_result['error']}"
+                )
+                return Response(
+                    {'error': 'Invalid webhook signature'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+            
+            logger.info(f"Webhook signature validated using {validation_result['format_detected']} format")
+        
+        # Parse JSON payload
+        try:
+            payload = request.data if hasattr(request, 'data') else json.loads(raw_body.decode('utf-8'))
+        except json.JSONDecodeError:
+            return Response(
+                {'error': 'Invalid JSON payload'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Log the webhook receipt
+        from .models import IntegrationLog
+        IntegrationLog.objects.create(
+            organizer=webhook.organizer,
+            log_type='webhook_received',
+            integration_type='webhook',
+            message=f"Webhook received from {request.META.get('REMOTE_ADDR', 'unknown')}",
+            details={
+                'webhook_name': webhook.name,
+                'payload_size': len(raw_body),
+                'signature_validated': bool(webhook.secret_key),
+                'user_agent': request.META.get('HTTP_USER_AGENT', ''),
+                'payload_preview': str(payload)[:500]  # First 500 chars for debugging
+            },
+            success=True
+        )
+        
+        # Process the webhook payload (customize based on your needs)
+        # This is where you would implement business logic for handling
+        # different types of webhook events
+        
+        return Response({
+            'message': 'Webhook received successfully',
+            'webhook_id': str(webhook.id),
+            'timestamp': timezone.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
+        return Response(
+            {'error': 'Internal server error'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
 def oauth_callback(request):
     """Handle OAuth callback and store tokens."""
     serializer = OAuthCallbackSerializer(data=request.data)
@@ -267,10 +396,40 @@ def exchange_oauth_code(provider, code):
         # Zoom uses Basic Auth
         auth = (settings.ZOOM_CLIENT_ID, settings.ZOOM_CLIENT_SECRET)
         response = requests.post(token_url, data=data, auth=auth, timeout=30)
+    elif provider == 'apple':
+        token_url = "https://appleid.apple.com/auth/token"
+        data = {
+            'client_id': getattr(settings, 'APPLE_CLIENT_ID', ''),
+            'client_secret': getattr(settings, 'APPLE_CLIENT_SECRET', ''),
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': getattr(settings, 'APPLE_REDIRECT_URI', '')
+        }
+    elif provider == 'microsoft_teams':
+        # Microsoft Teams uses same OAuth as Outlook
+        token_url = f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
+        data = {
+            'client_id': settings.MICROSOFT_CLIENT_ID,
+            'client_secret': settings.MICROSOFT_CLIENT_SECRET,
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': settings.MICROSOFT_REDIRECT_URI
+        }
+    elif provider == 'webex':
+        token_url = "https://webexapis.com/v1/access_token"
+        data = {
+            'grant_type': 'authorization_code',
+            'client_id': getattr(settings, 'WEBEX_CLIENT_ID', ''),
+            'client_secret': getattr(settings, 'WEBEX_CLIENT_SECRET', ''),
+            'code': code,
+            'redirect_uri': getattr(settings, 'WEBEX_REDIRECT_URI', '')
+        }
     else:
         raise ValueError(f"Unsupported provider: {provider}")
     
-    if provider != 'zoom':
+    if provider not in ['zoom', 'webex']:
+        response = requests.post(token_url, data=data, timeout=30)
+    elif provider == 'webex':
         response = requests.post(token_url, data=data, timeout=30)
     
     if response.status_code != 200:
@@ -298,13 +457,42 @@ def get_provider_user_info(provider, access_token):
         response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers, timeout=30)
     elif provider == 'zoom':
         response = requests.get('https://api.zoom.us/v2/users/me', headers=headers, timeout=30)
+    elif provider == 'apple':
+        # Apple's user info endpoint
+        response = requests.get('https://appleid.apple.com/auth/userinfo', headers=headers, timeout=30)
+    elif provider == 'microsoft_teams':
+        # Microsoft Teams uses same user info as Outlook
+        response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers, timeout=30)
+    elif provider == 'webex':
+        response = requests.get('https://webexapis.com/v1/people/me', headers=headers, timeout=30)
     else:
         raise ValueError(f"Unsupported provider: {provider}")
     
     if response.status_code != 200:
         raise Exception(f"Failed to get user info: {response.text}")
     
-    return response.json()
+    user_data = response.json()
+    
+    # Normalize user data across providers
+    if provider == 'webex':
+        # Webex returns emails as an array
+        emails = user_data.get('emails', [])
+        primary_email = next((email['value'] for email in emails if email.get('type') == 'work'), 
+                           emails[0]['value'] if emails else '')
+        return {
+            'id': user_data.get('id', ''),
+            'email': primary_email,
+            'name': user_data.get('displayName', '')
+        }
+    elif provider == 'apple':
+        # Apple returns limited user info
+        return {
+            'id': user_data.get('sub', ''),
+            'email': user_data.get('email', ''),
+            'name': user_data.get('name', {}).get('firstName', '') + ' ' + user_data.get('name', {}).get('lastName', '')
+        }
+    
+    return user_data
 
 
 @api_view(['GET'])
@@ -386,15 +574,31 @@ def test_webhook(request, pk):
     """Test a webhook integration."""
     webhook = get_object_or_404(WebhookIntegration, pk=pk, organizer=request.user)
     
-    # Trigger test webhook
+    # Create test payload
+    test_payload = {
+        'event': 'test',
+        'timestamp': timezone.now().isoformat(),
+        'data': {
+            'message': 'This is a test webhook from Calendly Clone',
+            'webhook_id': str(webhook.id),
+            'organizer_email': request.user.email,
+            'test_mode': True
+        }
+    }
+    
+    # Trigger test webhook with signature
     from .tasks import send_webhook
     send_webhook.delay(
         webhook_id=webhook.id,
         event_type='test',
-        data={'message': 'This is a test webhook'}
+        data=test_payload
     )
     
-    return Response({'message': 'Test webhook triggered'})
+    return Response({
+        'message': 'Test webhook triggered',
+        'payload': test_payload,
+        'webhook_url': webhook.webhook_url
+    })
 
 
 @api_view(['POST'])

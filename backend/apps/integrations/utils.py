@@ -145,6 +145,12 @@ def refresh_access_token(integration):
             return _refresh_microsoft_token(integration)
         elif integration.provider == 'zoom':
             return _refresh_zoom_token(integration)
+        elif integration.provider == 'apple':
+            return _refresh_apple_token(integration)
+        elif integration.provider == 'microsoft_teams':
+            return _refresh_microsoft_token(integration)  # Uses same OAuth as Outlook
+        elif integration.provider == 'webex':
+            return _refresh_webex_token(integration)
         else:
             logger.error(f"Token refresh not implemented for provider: {integration.provider}")
             return False
@@ -238,6 +244,49 @@ def _refresh_zoom_token(integration):
     integration.save(update_fields=['access_token', 'refresh_token', 'token_expires_at'])
     
     logger.info(f"Successfully refreshed Zoom token for {integration.organizer.email}")
+    return True
+
+
+def _refresh_apple_token(integration):
+    """
+    Refresh Apple Calendar token.
+    
+    Note: Apple Calendar typically uses app-specific passwords or
+    Sign in with Apple OAuth. This is a simplified implementation.
+    """
+    # Apple Calendar integration often uses app-specific passwords
+    # which don't expire in the traditional OAuth sense.
+    # For a full implementation, you would need to handle
+    # Sign in with Apple OAuth refresh flow.
+    
+    logger.info(f"Apple Calendar token refresh not required for {integration.organizer.email}")
+    return True  # App-specific passwords don't typically expire
+
+
+def _refresh_webex_token(integration):
+    """Refresh Webex OAuth token."""
+    token_url = "https://webexapis.com/v1/access_token"
+    
+    data = {
+        'grant_type': 'refresh_token',
+        'client_id': settings.WEBEX_CLIENT_ID,
+        'client_secret': settings.WEBEX_CLIENT_SECRET,
+        'refresh_token': integration.refresh_token
+    }
+    
+    response = make_api_request('POST', token_url, json_data=data)
+    token_data = response.json()
+    
+    # Update integration with new token
+    integration.access_token = token_data['access_token']
+    integration.token_expires_at = timezone.now() + timedelta(seconds=token_data.get('expires_in', 3600))
+    
+    if 'refresh_token' in token_data:
+        integration.refresh_token = token_data['refresh_token']
+    
+    integration.save(update_fields=['access_token', 'refresh_token', 'token_expires_at'])
+    
+    logger.info(f"Successfully refreshed Webex token for {integration.organizer.email}")
     return True
 
 
@@ -351,14 +400,112 @@ def parse_outlook_calendar_event(event_data):
     }
 
 
+def parse_apple_calendar_event(ical_data):
+    """
+    Parse Apple Calendar event data (iCalendar format) into our format.
+    
+    Args:
+        ical_data: iCalendar formatted event data
+    
+    Returns:
+        dict: Parsed event data
+    """
+    try:
+        lines = ical_data.strip().split('\n')
+        event_data = {}
+        in_event = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            if line == 'BEGIN:VEVENT':
+                in_event = True
+                continue
+            elif line == 'END:VEVENT':
+                break
+            elif not in_event:
+                continue
+            
+            # Parse property lines
+            if ':' in line:
+                prop, value = line.split(':', 1)
+                
+                # Handle properties with parameters (e.g., DTSTART;TZID=...)
+                if ';' in prop:
+                    prop = prop.split(';')[0]
+                
+                event_data[prop] = value
+        
+        # Extract required fields
+        if 'UID' not in event_data or 'DTSTART' not in event_data or 'DTEND' not in event_data:
+            return None
+        
+        # Parse datetime fields
+        start_datetime = _parse_ical_datetime(event_data['DTSTART'])
+        end_datetime = _parse_ical_datetime(event_data['DTEND'])
+        
+        if not start_datetime or not end_datetime:
+            return None
+        
+        # Check if event is cancelled or transparent (free time)
+        status = event_data.get('STATUS', 'CONFIRMED')
+        transp = event_data.get('TRANSP', 'OPAQUE')
+        
+        if status == 'CANCELLED' or transp == 'TRANSPARENT':
+            return None
+        
+        return {
+            'external_id': event_data['UID'],
+            'summary': event_data.get('SUMMARY', 'Busy'),
+            'start_datetime': start_datetime,
+            'end_datetime': end_datetime,
+            'updated': timezone.now(),  # iCalendar may not always provide LAST-MODIFIED
+            'status': 'confirmed',
+            'transparency': 'opaque' if transp != 'TRANSPARENT' else 'transparent'
+        }
+        
+    except Exception as e:
+        logger.warning(f"Error parsing Apple Calendar event: {str(e)}")
+        return None
+
+
+def _parse_ical_datetime(dt_string):
+    """
+    Parse iCalendar datetime string.
+    
+    Args:
+        dt_string: iCalendar datetime string
+    
+    Returns:
+        datetime: Parsed datetime object in UTC
+    """
+    try:
+        # Handle different iCalendar datetime formats
+        if dt_string.endswith('Z'):
+            # UTC time
+            return datetime.strptime(dt_string, '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+        elif 'T' in dt_string:
+            # Local time (assume UTC for simplicity)
+            dt = datetime.strptime(dt_string, '%Y%m%dT%H%M%S')
+            return dt.replace(tzinfo=timezone.utc)
+        else:
+            # Date only (all-day event)
+            date_obj = datetime.strptime(dt_string, '%Y%m%d').date()
+            return datetime.combine(date_obj, datetime.min.time()).replace(tzinfo=timezone.utc)
+            
+    except Exception as e:
+        logger.warning(f"Error parsing iCalendar datetime '{dt_string}': {str(e)}")
+        return None
+
+
 def validate_webhook_signature(payload, signature, secret):
     """
     Validate webhook signature for security.
     
     Args:
-        payload: Raw webhook payload
-        signature: Signature from webhook headers
-        secret: Webhook secret key
+        payload: Raw webhook payload (bytes)
+        signature: Signature from webhook headers (string)
+        secret: Webhook secret key (string)
     
     Returns:
         bool: True if signature is valid
@@ -367,17 +514,151 @@ def validate_webhook_signature(payload, signature, secret):
     import hashlib
     
     if not secret or not signature:
+        logger.warning("Webhook signature validation failed: missing secret or signature")
         return False
     
-    # Calculate expected signature
-    expected_signature = hmac.new(
-        secret.encode('utf-8'),
-        payload,
-        hashlib.sha256
-    ).hexdigest()
+    try:
+        # Ensure payload is bytes
+        if isinstance(payload, str):
+            payload = payload.encode('utf-8')
+        
+        # Handle different signature formats
+        if signature.startswith('sha256='):
+            # GitHub/Stripe style: "sha256=<hex_digest>"
+            provided_signature = signature[7:]  # Remove 'sha256=' prefix
+            hash_function = hashlib.sha256
+        elif signature.startswith('sha1='):
+            # Legacy style: "sha1=<hex_digest>"
+            provided_signature = signature[5:]  # Remove 'sha1=' prefix
+            hash_function = hashlib.sha1
+        else:
+            # Assume raw hex digest (no prefix)
+            provided_signature = signature
+            hash_function = hashlib.sha256
+        
+        # Calculate expected signature
+        expected_signature = hmac.new(
+            secret.encode('utf-8'),
+            payload,
+            hash_function
+        ).hexdigest()
+        
+        # Compare signatures securely (constant-time comparison)
+        is_valid = hmac.compare_digest(expected_signature, provided_signature)
+        
+        if not is_valid:
+            logger.warning(f"Webhook signature validation failed: expected {expected_signature}, got {provided_signature}")
+        
+        return is_valid
+        
+    except Exception as e:
+        logger.error(f"Error validating webhook signature: {str(e)}")
+        return False
+
+
+def validate_webhook_signature_multiple_formats(payload, signature_header, secret):
+    """
+    Validate webhook signature supporting multiple common formats.
     
-    # Compare signatures securely
-    return hmac.compare_digest(f"sha256={expected_signature}", signature)
+    Args:
+        payload: Raw webhook payload (bytes or string)
+        signature_header: Full signature header value
+        secret: Webhook secret key
+    
+    Returns:
+        dict: Validation result with details
+    """
+    if not secret or not signature_header:
+        return {
+            'valid': False,
+            'error': 'Missing secret or signature header',
+            'format_detected': None
+        }
+    
+    # Common webhook signature formats
+    signature_formats = [
+        {
+            'name': 'github',
+            'pattern': r'^sha256=([a-f0-9]{64})$',
+            'hash_function': hashlib.sha256,
+            'prefix': 'sha256='
+        },
+        {
+            'name': 'stripe',
+            'pattern': r'^v1,t=\d+,v1=([a-f0-9]{64})$',
+            'hash_function': hashlib.sha256,
+            'extract_signature': lambda s: s.split('v1=')[1] if 'v1=' in s else None
+        },
+        {
+            'name': 'slack',
+            'pattern': r'^v0=([a-f0-9]{64})$',
+            'hash_function': hashlib.sha256,
+            'prefix': 'v0='
+        },
+        {
+            'name': 'generic_sha256',
+            'pattern': r'^([a-f0-9]{64})$',
+            'hash_function': hashlib.sha256,
+            'prefix': ''
+        },
+        {
+            'name': 'generic_sha1',
+            'pattern': r'^sha1=([a-f0-9]{40})$',
+            'hash_function': hashlib.sha1,
+            'prefix': 'sha1='
+        }
+    ]
+    
+    try:
+        # Ensure payload is bytes
+        if isinstance(payload, str):
+            payload = payload.encode('utf-8')
+        
+        for format_config in signature_formats:
+            import re
+            match = re.match(format_config['pattern'], signature_header)
+            
+            if match:
+                # Extract signature based on format
+                if 'extract_signature' in format_config:
+                    provided_signature = format_config['extract_signature'](signature_header)
+                    if not provided_signature:
+                        continue
+                elif format_config['prefix']:
+                    provided_signature = signature_header[len(format_config['prefix']):]
+                else:
+                    provided_signature = match.group(1)
+                
+                # Calculate expected signature
+                expected_signature = hmac.new(
+                    secret.encode('utf-8'),
+                    payload,
+                    format_config['hash_function']
+                ).hexdigest()
+                
+                # Compare signatures securely
+                is_valid = hmac.compare_digest(expected_signature, provided_signature)
+                
+                return {
+                    'valid': is_valid,
+                    'format_detected': format_config['name'],
+                    'error': None if is_valid else 'Signature mismatch'
+                }
+        
+        return {
+            'valid': False,
+            'error': 'Unrecognized signature format',
+            'format_detected': None
+        }
+        
+    except Exception as e:
+        logger.error(f"Error validating webhook signature: {str(e)}")
+        return {
+            'valid': False,
+            'error': f'Validation error: {str(e)}',
+            'format_detected': None
+        }
+    
 
 
 def get_provider_scopes(provider, integration_type):
@@ -417,6 +698,25 @@ def get_provider_scopes(provider, integration_type):
             'video': [
                 'meeting:write',
                 'meeting:read'
+            ]
+        },
+        'apple': {
+            'calendar': [
+                'calendar:read',
+                'calendar:write'
+            ]
+        },
+        'microsoft_teams': {
+            'video': [
+                'https://graph.microsoft.com/OnlineMeetings.ReadWrite',
+                'https://graph.microsoft.com/User.Read',
+                'offline_access'
+            ]
+        },
+        'webex': {
+            'video': [
+                'spark:meetings_write',
+                'spark:meetings_read'
             ]
         }
     }

@@ -320,6 +320,16 @@ ZOOM_CLIENT_ID = config('ZOOM_CLIENT_ID', default='')
 ZOOM_CLIENT_SECRET = config('ZOOM_CLIENT_SECRET', default='')
 ZOOM_REDIRECT_URI = config('ZOOM_REDIRECT_URI', default='http://localhost:8000/api/v1/integrations/oauth/callback/')
 
+# Apple Calendar Configuration
+APPLE_CLIENT_ID = config('APPLE_CLIENT_ID', default='')
+APPLE_CLIENT_SECRET = config('APPLE_CLIENT_SECRET', default='')
+APPLE_REDIRECT_URI = config('APPLE_REDIRECT_URI', default='http://localhost:8000/api/v1/integrations/oauth/callback/')
+
+# Webex API Configuration
+WEBEX_CLIENT_ID = config('WEBEX_CLIENT_ID', default='')
+WEBEX_CLIENT_SECRET = config('WEBEX_CLIENT_SECRET', default='')
+WEBEX_REDIRECT_URI = config('WEBEX_REDIRECT_URI', default='http://localhost:8000/api/v1/integrations/oauth/callback/')
+
 # Integration Rate Limiting
 INTEGRATION_RATE_LIMIT_GOOGLE = config('INTEGRATION_RATE_LIMIT_GOOGLE', default=100, cast=int)  # requests per minute
 INTEGRATION_RATE_LIMIT_MICROSOFT = config('INTEGRATION_RATE_LIMIT_MICROSOFT', default=60, cast=int)

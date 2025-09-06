@@ -12,6 +12,9 @@ from .utils import log_integration_activity, ensure_valid_token, detect_integrat
 from .google_client import GoogleCalendarClient, GoogleMeetClient
 from .outlook_client import OutlookCalendarClient
 from .zoom_client import ZoomClient
+from .apple_client import AppleCalendarClient
+from .microsoft_teams_client import MicrosoftTeamsClient
+from .webex_client import WebexClient
 
 
 @shared_task
@@ -37,6 +40,9 @@ def create_calendar_event(booking_id):
                     external_event_id = client.create_event(booking)
                 elif integration.provider == 'outlook':
                     client = OutlookCalendarClient(integration)
+                    external_event_id = client.create_event(booking)
+                elif integration.provider == 'apple':
+                    client = AppleCalendarClient(integration)
                     external_event_id = client.create_event(booking)
                 else:
                     logger.warning(f"Calendar provider {integration.provider} not implemented")
@@ -85,6 +91,12 @@ def generate_meeting_link(booking_id):
                 elif integration.provider == 'google_meet':
                     client = GoogleMeetClient(integration)
                     meeting_details = client.create_meeting(booking)
+                elif integration.provider == 'microsoft_teams':
+                    client = MicrosoftTeamsClient(integration)
+                    meeting_details = client.create_meeting(booking)
+                elif integration.provider == 'webex':
+                    client = WebexClient(integration)
+                    meeting_details = client.create_meeting(booking)
                 else:
                     logger.warning(f"Video provider {integration.provider} not implemented")
                     continue
@@ -131,6 +143,9 @@ def remove_calendar_event(booking_id):
                 elif integration.provider == 'outlook':
                     client = OutlookCalendarClient(integration)
                     client.delete_event(booking)
+                elif integration.provider == 'apple':
+                    client = AppleCalendarClient(integration)
+                    client.delete_event(booking)
                 else:
                     logger.warning(f"Calendar provider {integration.provider} not implemented")
                     continue
@@ -163,16 +178,32 @@ def send_webhook(webhook_id, event_type, data):
         # Prepare headers
         headers = {
             'Content-Type': 'application/json',
-            'User-Agent': 'Calendly-Clone-Webhook/1.0'
+            'User-Agent': 'Calendly-Clone-Webhook/1.0',
+            'X-Webhook-Event': event_type,
+            'X-Webhook-Timestamp': data.get('timestamp', timezone.now().isoformat())
         }
         
         # Add custom headers
         if webhook.headers:
             headers.update(webhook.headers)
         
-        # Add secret key if provided
+        # Add webhook signature if secret key is provided
         if webhook.secret_key:
-            headers['X-Webhook-Secret'] = webhook.secret_key
+            import hmac
+            import hashlib
+            import json
+            
+            # Create payload string
+            payload_string = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+            
+            # Generate HMAC-SHA256 signature
+            signature = hmac.new(
+                webhook.secret_key.encode('utf-8'),
+                payload_string.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            headers['X-Webhook-Signature'] = f'sha256={signature}'
         
         # Send webhook
         response = requests.post(
@@ -230,6 +261,9 @@ def sync_calendar_events(integration_id):
             external_events = client.get_busy_times(start_date, end_date)
         elif integration.provider == 'outlook':
             client = OutlookCalendarClient(integration)
+            external_events = client.get_busy_times(start_date, end_date)
+        elif integration.provider == 'apple':
+            client = AppleCalendarClient(integration)
             external_events = client.get_busy_times(start_date, end_date)
         else:
             logger.warning(f"Calendar sync not implemented for {integration.provider}")
@@ -549,6 +583,9 @@ def update_calendar_event(booking_id):
                     client.update_event(booking)
                 elif integration.provider == 'outlook':
                     client = OutlookCalendarClient(integration)
+                    client.update_event(booking)
+                elif integration.provider == 'apple':
+                    client = AppleCalendarClient(integration)
                     client.update_event(booking)
                 else:
                     logger.warning(f"Calendar provider {integration.provider} not implemented")
