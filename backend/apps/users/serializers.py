@@ -101,15 +101,38 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         user.save(update_fields=['password_changed_at'])
         
         # Assign default role
-        default_role, _ = Role.objects.get_or_create(
+        default_role, created = Role.objects.get_or_create(
             name='organizer',
             defaults={
                 'role_type': 'organizer',
                 'description': 'Default organizer role',
-                'permissions': ['can_create_events', 'can_manage_bookings'],
                 'is_system_role': True
             }
         )
+        
+        # Add permissions to the role if it was just created
+        if created:
+            # Get or create the required permissions
+            create_events_perm, _ = Permission.objects.get_or_create(
+                codename='can_create_events',
+                defaults={
+                    'name': 'Create Events',
+                    'description': 'Can create event types',
+                    'category': 'event_management'
+                }
+            )
+            manage_bookings_perm, _ = Permission.objects.get_or_create(
+                codename='can_manage_bookings',
+                defaults={
+                    'name': 'Manage Bookings',
+                    'description': 'Can manage all bookings',
+                    'category': 'event_management'
+                }
+            )
+            
+            # Add permissions to the role
+            default_role.role_permissions.add(create_events_perm, manage_bookings_perm)
+        
         user.roles.add(default_role)
         
         return user
