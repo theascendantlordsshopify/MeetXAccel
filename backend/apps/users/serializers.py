@@ -73,7 +73,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'email', 'username', 'first_name', 'last_name',
+            'email', 'first_name', 'last_name',
             'password', 'password_confirm', 'terms_accepted'
         ]
     
@@ -96,6 +96,9 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         validated_data.pop('password_confirm')
         validated_data.pop('terms_accepted')
         
+        # Set username to email since our User model uses email as USERNAME_FIELD
+        validated_data['username'] = validated_data['email']
+        
         user = User.objects.create_user(**validated_data)
         user.password_changed_at = timezone.now()
         user.save(update_fields=['password_changed_at'])
@@ -105,10 +108,33 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             name='organizer',
             defaults={
                 'role_type': 'organizer',
-                'description': 'Default organizer role',
                 'is_system_role': True
             }
         )
+        
+        # Add permissions to the role if it was just created
+        if created:
+            # Get or create the required permissions
+            create_events_perm, _ = Permission.objects.get_or_create(
+                codename='can_create_events',
+                defaults={
+                    'name': 'Create Events',
+                    'description': 'Can create event types',
+                    'category': 'event_management'
+                }
+            )
+            manage_bookings_perm, _ = Permission.objects.get_or_create(
+                codename='can_manage_bookings',
+                defaults={
+                    'name': 'Manage Bookings',
+                    'description': 'Can manage all bookings',
+                    'category': 'event_management'
+                }
+            )
+            
+            # Add permissions to the role
+            default_role.role_permissions.add(create_events_perm, manage_bookings_perm)
+        
         
         # Add permissions to the role if it was just created
         if created:

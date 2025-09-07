@@ -190,6 +190,7 @@ ACCOUNT_LOGIN_METHODS = ['email']
 ACCOUNT_EMAIL_VERIFICATION = 'mandatory'
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 ACCOUNT_USER_MODEL_EMAIL_FIELD = 'email'
+ACCOUNT_SIGNUP_FIELDS = ['email', 'first_name', 'last_name']
 ACCOUNT_RATE_LIMITS = {
     'login_failed': '5/5m'  # 5 attempts per 5 minutes
 }
