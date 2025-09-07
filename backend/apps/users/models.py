@@ -109,7 +109,7 @@ class User(AbstractUser):
     
     # Account management
     account_status = models.CharField(
-        max_length=20,
+        max_length=50,
         choices=[
             ('active', 'Active'),
             ('inactive', 'Inactive'),
