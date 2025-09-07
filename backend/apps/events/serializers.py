@@ -236,6 +236,8 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
         # Handle status changes
         if validated_data.get('status') == 'cancelled':
             updated_instance.cancelled_at = timezone.now()
+                
+                return updated_instance
             updated_instance.cancelled_by = 'organizer'
             updated_instance.save(update_fields=['cancelled_at', 'cancelled_by'])
 class WaitlistEntrySerializer(serializers.ModelSerializer):
@@ -255,8 +257,6 @@ class WaitlistEntrySerializer(serializers.ModelSerializer):
             'id', 'event_type_name', 'status', 'status_display', 'is_expired',
             'notified_at', 'created_at'
         ]
-        
-        return updated_instance
 class PublicBookingPageSerializer(serializers.Serializer):
     """Serializer for public booking page data."""
     event_type = PublicEventTypeSerializer()
