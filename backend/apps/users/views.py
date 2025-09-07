@@ -12,7 +12,8 @@ from django_ratelimit.decorators import ratelimit
 from django.utils.decorators import method_decorator
 from .models import (
     User, Profile, Role, Permission, EmailVerificationToken, PasswordResetToken,
-    Invitation, AuditLog, UserSession, PasswordHistory
+    Invitation, AuditLog, UserSession, PasswordHistory, MFADevice,
+    SAMLConfiguration, OIDCConfiguration, SSOSession
 )
 from .serializers import (
     UserSerializer, UserRegistrationSerializer, LoginSerializer, PermissionSerializer,
@@ -21,9 +22,13 @@ from .serializers import (
     EmailVerificationSerializer, ResendVerificationSerializer,
     InvitationSerializer, InvitationCreateSerializer, InvitationResponseSerializer,
     AuditLogSerializer, UserSessionSerializer, PublicProfileSerializer,
-    RoleSerializer
+    RoleSerializer, MFADeviceSerializer, MFASetupSerializer, MFAVerificationSerializer,
+    SAMLConfigurationSerializer, OIDCConfigurationSerializer, SSOInitiateSerializer
 )
-from .tasks import send_welcome_email, send_verification_email, send_password_reset_email, send_invitation_email
+from .tasks import (
+    send_welcome_email, send_verification_email, send_password_reset_email, send_invitation_email,
+    send_sms_verification, send_sms_mfa_code
+)
 from .utils import get_client_ip, get_user_agent, create_audit_log, get_geolocation_from_ip
 
 
@@ -802,6 +807,65 @@ def regenerate_backup_codes(request):
         'message': 'Backup codes regenerated',
         'backup_codes': backup_codes
     })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def resend_sms_otp(request):
+    """Resend SMS verification code for MFA setup."""
+    user = request.user
+    
+    try:
+        # Find the user's active SMS MFA device
+        sms_device = MFADevice.objects.get(user=user, device_type='sms', is_active=True)
+        
+        # Call the task to send the SMS verification
+        send_sms_verification.delay(user.id, sms_device.phone_number)
+        
+        return Response({'message': 'SMS verification code sent successfully'})
+    except MFADevice.DoesNotExist:
+        return Response(
+            {'error': 'No active SMS MFA device found for this user.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to resend SMS verification code: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def send_sms_mfa_code_view(request):
+    """Send SMS MFA code during login (used for existing MFA devices)."""
+    user = request.user
+    device_id = request.data.get('device_id')
+
+    if not device_id:
+        return Response({'error': 'Device ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Ensure the device belongs to the user and is an active SMS device
+        MFADevice.objects.get(id=device_id, user=user, device_type='sms', is_active=True)
+        send_sms_mfa_code.delay(user.id, device_id)
+        return Response({'message': 'SMS MFA code sent successfully'})
+    except MFADevice.DoesNotExist:
+        return Response({'error': 'MFA device not found or not active for this user.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': f'Failed to send SMS MFA code: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def verify_sms_mfa_login(request):
+    """Verify SMS MFA code during login."""
+    # This view would typically be part of the login flow,
+    # where the user provides the OTP received via SMS.
+    # The actual verification logic would be handled by the LoginSerializer
+    # or a dedicated MFA verification serializer.
+    # For now, it's a placeholder as the login serializer handles the actual verification.
+    return Response({'message': 'SMS MFA login verification endpoint (implementation in serializer)'})
 
 
 # SSO Configuration Views (Admin only)
