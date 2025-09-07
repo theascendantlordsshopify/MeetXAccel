@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.utils import timezone
+from django.forms.models import model_to_dict
 from .models import EventType, Booking, Attendee, WaitlistEntry, CustomQuestion
 from apps.users.serializers import UserSerializer
 
@@ -17,7 +18,7 @@ class CustomQuestionSerializer(serializers.ModelSerializer):
 class EventTypeSerializer(serializers.ModelSerializer):
     organizer = UserSerializer(read_only=True)
     questions = CustomQuestionSerializer(many=True, read_only=True)
-    is_group_event = serializers.BooleanField(source='is_group_event', read_only=True)
+    is_group_event = serializers.BooleanField(read_only=True)
     total_duration_with_buffers = serializers.IntegerField(source='get_total_duration_with_buffers', read_only=True)
     
     class Meta:
@@ -31,7 +32,7 @@ class EventTypeSerializer(serializers.ModelSerializer):
             'max_occurrences', 'recurrence_end_date', 'location_type',
             'location_details', 'redirect_url_after_booking',
             'confirmation_workflow', 'reminder_workflow', 'cancellation_workflow',
-            'custom_questions', 'questions', 'is_group_event',
+            'questions', 'is_group_event',
             'total_duration_with_buffers', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'event_type_slug', 'created_at', 'updated_at']
@@ -55,7 +56,7 @@ class EventTypeCreateSerializer(serializers.ModelSerializer):
             'max_occurrences', 'recurrence_end_date', 'location_type',
             'location_details', 'redirect_url_after_booking',
             'confirmation_workflow', 'reminder_workflow', 'cancellation_workflow',
-            'custom_questions', 'questions_data'
+            'questions_data'
         ]
     
     def create(self, validated_data):
@@ -81,7 +82,7 @@ class PublicEventTypeSerializer(serializers.ModelSerializer):
     organizer_company = serializers.CharField(source='organizer.profile.company', read_only=True)
     organizer_timezone = serializers.CharField(source='organizer.profile.timezone_name', read_only=True)
     questions = CustomQuestionSerializer(many=True, read_only=True)
-    is_group_event = serializers.BooleanField(source='is_group_event', read_only=True)
+    is_group_event = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = EventType
@@ -91,7 +92,7 @@ class PublicEventTypeSerializer(serializers.ModelSerializer):
             'min_scheduling_notice', 'max_scheduling_horizon',
             'organizer_name', 'organizer_bio', 'organizer_picture',
             'organizer_company', 'organizer_timezone', 'questions',
-            'is_group_event', 'custom_questions'
+            'is_group_event'
         ]
 
 
@@ -158,6 +159,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         # Validate that the start_time is in the future
         start_time = attrs.get('start_time')
         if start_time and start_time <= timezone.now():
+            # Ensure timezone-aware comparison
             raise serializers.ValidationError("Start time must be in the future")
         
         # Validate attendee count
@@ -207,10 +209,8 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
         ]
     
     def update(self, instance, validated_data):
-        # Track old values for audit
-        old_values = {}
-        for field in validated_data.keys():
-            old_values[field] = getattr(instance, field)
+        # Track old values for audit (full snapshot)
+        old_values = model_to_dict(instance)
         
         # Update instance
         updated_instance = super().update(instance, validated_data)
